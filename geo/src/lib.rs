@@ -25,20 +25,22 @@ pub struct Output {
     pub closest_region: Region,
 }
 
+const UNKNOWN_GEO: &str = "UNKNOWN";
+// Note: this is a compile-time check - which prevents us from submitting a procedure without the map!
 const LEADER_GEO_MAP_RAW: &str = include_str!("../data/leader-geo-map.json");
+// Note: OnceLock is needed to only load & parse once.
 static LEADER_GEO_BY_IP: OnceLock<HashMap<String, String>> = OnceLock::new();
 
+// Note: it is safe to use unwrap here, since we test the parseability of the map in the test below.
 fn leader_geo_by_ip() -> &'static HashMap<String, String> {
     LEADER_GEO_BY_IP.get_or_init(|| {
-        let parsed = serde_json::from_str::<Value>(LEADER_GEO_MAP_RAW).unwrap_or(Value::Null);
+        let parsed = serde_json::from_str::<Value>(LEADER_GEO_MAP_RAW).unwrap();
         parsed
             .as_object()
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(ip, geo)| geo.as_str().map(|geo| (ip.clone(), geo.to_string())))
-                    .collect::<HashMap<String, String>>()
-            })
-            .unwrap_or_default()
+            .unwrap()
+            .iter()
+            .map(|(ip, geo)| (ip.clone(), geo.as_str().unwrap().to_string()))
+            .collect::<HashMap<String, String>>()
     })
 }
 
@@ -89,16 +91,16 @@ impl CustomProcedure for Geo {
                 Some(addr) => {
                     let ip = addr.ip();
                     if ip.is_loopback() || ip.is_unspecified() {
-                        "UNKNOWN".to_string()
+                        UNKNOWN_GEO.to_string()
                     } else {
                         let ip_s = ip.to_string();
                         leader_geo_by_ip()
                             .get(&ip_s)
                             .cloned()
-                            .unwrap_or_else(|| "UNKNOWN".to_string())
+                            .unwrap_or_else(|| UNKNOWN_GEO.to_string())
                     }
                 }
-                None => "UNKNOWN".to_string(),
+                None => UNKNOWN_GEO.to_string(),
             }
         };
 
@@ -116,3 +118,16 @@ impl CustomProcedure for Geo {
 }
 
 zela_custom_procedure!(Geo);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leader_geo_map_parsing_logic_works() {
+        let map = leader_geo_by_ip();
+        assert!(!map.is_empty());
+        assert!(map.keys().all(|ip| !ip.trim().is_empty()));
+        assert!(map.values().all(|geo| !geo.trim().is_empty()));
+    }
+}
