@@ -4,13 +4,22 @@ use zela_std::{CustomProcedure, RpcError, rpc_client::RpcClient, zela_custom_pro
 pub struct Geo;
 
 #[derive(Deserialize, Debug)]
-pub struct Input {
+pub struct Input {}
+
+#[derive(Serialize)]
+pub enum Region {
+    Frankfurt,
+    Dubai,
+    NewYork,
+    Tokyo,
 }
 
 #[derive(Serialize)]
 pub struct Output {
     pub slot: u64,
     pub leader: String,
+    pub leader_geo: String,
+    pub closest_region: Region,
 }
 
 impl CustomProcedure for Geo {
@@ -18,9 +27,7 @@ impl CustomProcedure for Geo {
     type ErrorData = ();
     type SuccessData = Output;
 
-    async fn run(params: Self::Params) -> Result<Self::SuccessData, RpcError<Self::ErrorData>> {
-        log::debug!("params: {params:?}");
-
+    async fn run(_: Self::Params) -> Result<Self::SuccessData, RpcError<Self::ErrorData>> {
         let client = RpcClient::new();
         let slot = client.get_slot().await?;
         let epoch_info = client.get_epoch_info().await?;
@@ -44,11 +51,33 @@ impl CustomProcedure for Geo {
                 data: None,
             })?;
 
-        log::info!("Current slot {slot} leader: {leader}");
+        let leader_geo = {
+            let nodes = client.get_cluster_nodes().await?;
+            let endpoint = nodes
+                .into_iter()
+                .find(|node| node.pubkey == leader)
+                .and_then(|node| node.gossip.or(node.tpu).or(node.rpc).or(node.tvu));
+
+            match endpoint {
+                Some(addr) => {
+                    let ip = addr.ip();
+                    if ip.is_loopback() || ip.is_unspecified() {
+                        "UNKNOWN".to_string()
+                    } else {
+                        format!("near endpoint IP {ip} (coarse)")
+                    }
+                }
+                None => "UNKNOWN".to_string(),
+            }
+        };
+
+        let closest_region = Region::Frankfurt;
 
         Ok(Output {
             slot,
             leader,
+            leader_geo,
+            closest_region,
         })
     }
 
