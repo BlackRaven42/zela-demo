@@ -27,7 +27,7 @@ pub struct Output {
 
 const UNKNOWN_GEO: &str = "UNKNOWN";
 // Note: this is a compile-time check - which prevents us from submitting a procedure without the map!
-const LEADER_GEO_MAP_RAW: &str = include_str!("../data/leader-geo-map.json");
+const LEADER_GEO_MAP_RAW: &str = include_str!("../data/ip-geo-map.json");
 // Note: OnceLock is needed to only load & parse once.
 static LEADER_GEO_BY_IP: OnceLock<HashMap<String, String>> = OnceLock::new();
 
