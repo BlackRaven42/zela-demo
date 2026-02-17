@@ -1,17 +1,22 @@
 #!/bin/sh
 
+if [ -f ".env" ]; then
+	set -a
+	. ".env"
+	set +a
+fi
 
 KEY_ID="$ZELA_PROJECT_KEY_ID"
 KEY_SECRET="$ZELA_PROJECT_KEY_SECRET"
-
-PROCEDURE="${1}"
-PARAMS="${2}"
+PROCEDURE="$ZELA_PROCEDURE"
+PARAMS="$ZELA_PARAMS"
 
 usage() {
-	echo "usage: ZELA_PROJECT_KEY_ID=key_id ZELA_PROJECT_KEY_SECRET=key_secret run-procedure.sh procedure#revision '{ "json": "params" }'"
+	echo "usage: define required variables in .env and run ./run-procedure.sh"
+	echo "required: ZELA_PROJECT_KEY_ID, ZELA_PROJECT_KEY_SECRET, ZELA_PROCEDURE, ZELA_PARAMS"
 }
 
-if [ -z "$PROCEDURE" ] || [ -z "$PARAMS" ] || [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then
+if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ] || [ -z "$PROCEDURE" ] || [ -z "$PARAMS" ]; then
 	usage
 	exit 1
 fi
