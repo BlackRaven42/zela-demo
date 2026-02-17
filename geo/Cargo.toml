@@ -9,4 +9,5 @@ crate-type = ["cdylib"]
 [dependencies]
 zela-std.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 log.workspace = true

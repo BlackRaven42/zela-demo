@@ -1,4 +1,7 @@
+use std::{collections::HashMap, sync::OnceLock};
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use zela_std::{CustomProcedure, RpcError, rpc_client::RpcClient, zela_custom_procedure};
 
 pub struct Geo;
@@ -20,6 +23,23 @@ pub struct Output {
     pub leader: String,
     pub leader_geo: String,
     pub closest_region: Region,
+}
+
+const LEADER_GEO_MAP_RAW: &str = include_str!("../data/leader-geo-map.json");
+static LEADER_GEO_BY_IP: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+fn leader_geo_by_ip() -> &'static HashMap<String, String> {
+    LEADER_GEO_BY_IP.get_or_init(|| {
+        let parsed = serde_json::from_str::<Value>(LEADER_GEO_MAP_RAW).unwrap_or(Value::Null);
+        parsed
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(ip, geo)| geo.as_str().map(|geo| (ip.clone(), geo.to_string())))
+                    .collect::<HashMap<String, String>>()
+            })
+            .unwrap_or_default()
+    })
 }
 
 impl CustomProcedure for Geo {
@@ -44,10 +64,17 @@ impl CustomProcedure for Geo {
         let slot_index = epoch_info.slot_index as usize;
         let leader = schedule
             .into_iter()
-            .find_map(|(identity, slots)| slots.into_iter().any(|s| s == slot_index).then_some(identity))
+            .find_map(|(identity, slots)| {
+                slots
+                    .into_iter()
+                    .any(|s| s == slot_index)
+                    .then_some(identity)
+            })
             .ok_or_else(|| RpcError {
                 code: 500,
-                message: format!("leader not found in schedule for slot {slot} (slot_index={slot_index})"),
+                message: format!(
+                    "leader not found in schedule for slot {slot} (slot_index={slot_index})"
+                ),
                 data: None,
             })?;
 
@@ -64,7 +91,11 @@ impl CustomProcedure for Geo {
                     if ip.is_loopback() || ip.is_unspecified() {
                         "UNKNOWN".to_string()
                     } else {
-                        format!("near endpoint IP {ip} (coarse)")
+                        let ip_s = ip.to_string();
+                        leader_geo_by_ip()
+                            .get(&ip_s)
+                            .cloned()
+                            .unwrap_or_else(|| "UNKNOWN".to_string())
                     }
                 }
                 None => "UNKNOWN".to_string(),
