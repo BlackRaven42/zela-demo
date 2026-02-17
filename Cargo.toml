@@ -1,5 +1,5 @@
 [workspace]
-members = ["block_time","hello_world", "priority_fees"]
+members = ["block_time", "hello_world", "priority_fees", "geo"]
 resolver = "3"
 
 [workspace.dependencies]
