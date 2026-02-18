@@ -1,9 +1,11 @@
 use std::{
     collections::HashMap,
+    net::IpAddr,
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +35,7 @@ pub struct Output {
 // Once this threshold is exceeded, the procedure warns the operator that it's time to rebuild the ip-geo map.
 const UNKNOWN_IP_WARN_THRESHOLD: u64 = 10;
 const UNKNOWN_GEO: &str = "UNKNOWN";
+const CLUSTER_NODES_CACHE_TTL: Duration = Duration::from_secs(60);
 
 // Note: atomic is just a precaution in case procedure can run concurrently.
 static UNKNOWN_IP_MISS_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -42,6 +45,7 @@ const LEADER_GEO_MAP_RAW: &str = include_str!("../data/ip-geo-map.json");
 
 // Note: OnceLock is needed to only load & parse once.
 static LEADER_GEO_BY_IP: OnceLock<HashMap<String, IpGeoInfo>> = OnceLock::new();
+static CLUSTER_NODE_IP_CACHE: OnceLock<Mutex<Option<ClusterNodeIpCache>>> = OnceLock::new();
 
 #[derive(Deserialize, Clone)]
 struct IpGeoInfo {
@@ -49,11 +53,54 @@ struct IpGeoInfo {
     closest_region: Region,
 }
 
+#[derive(Clone)]
+struct ClusterNodeIpCache {
+    fetched_at: Instant,
+    ip_by_pubkey: HashMap<String, IpAddr>,
+}
+
 // Note: it is safe to use unwrap here, since we test the parseability of the map in the test below.
 fn leader_geo_by_ip() -> &'static HashMap<String, IpGeoInfo> {
     LEADER_GEO_BY_IP.get_or_init(|| {
         serde_json::from_str::<HashMap<String, IpGeoInfo>>(LEADER_GEO_MAP_RAW).unwrap()
     })
+}
+
+async fn cluster_ip_by_pubkey_cached(
+    client: &RpcClient,
+) -> Result<HashMap<String, IpAddr>, RpcError<()>> {
+    let cache = CLUSTER_NODE_IP_CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(entry) = guard.as_ref() {
+            if entry.fetched_at.elapsed() <= CLUSTER_NODES_CACHE_TTL {
+                return Ok(entry.ip_by_pubkey.clone());
+            }
+        }
+    }
+
+    let ip_by_pubkey = client
+        .get_cluster_nodes()
+        .await?
+        .into_iter()
+        .filter_map(|node| {
+            node.gossip
+                .or(node.tpu)
+                .or(node.rpc)
+                .or(node.tvu)
+                .map(|addr| (node.pubkey, addr.ip()))
+        })
+        .collect::<HashMap<String, IpAddr>>();
+
+    {
+        let mut guard = cache.lock().unwrap();
+        *guard = Some(ClusterNodeIpCache {
+            fetched_at: Instant::now(),
+            ip_by_pubkey: ip_by_pubkey.clone(),
+        });
+    }
+
+    Ok(ip_by_pubkey)
 }
 
 impl CustomProcedure for Geo {
@@ -95,15 +142,9 @@ impl CustomProcedure for Geo {
         let fallback = (UNKNOWN_GEO.to_string(), Region::Tokyo);
 
         let (leader_geo, closest_region) = {
-            let nodes = client.get_cluster_nodes().await?;
-            let endpoint = nodes
-                .into_iter()
-                .find(|node| node.pubkey == leader)
-                .and_then(|node| node.gossip.or(node.tpu).or(node.rpc).or(node.tvu));
-
-            match endpoint {
-                Some(addr) => {
-                    let ip = addr.ip();
+            let ip_by_pubkey = cluster_ip_by_pubkey_cached(&client).await?;
+            match ip_by_pubkey.get(&leader).copied() {
+                Some(ip) => {
                     if ip.is_loopback() || ip.is_unspecified() {
                         // Likely won't ever happen, but just in case.
                         fallback.clone()
