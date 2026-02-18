@@ -59,6 +59,14 @@ struct ClusterNodeIpCache {
     ip_by_pubkey: HashMap<String, IpAddr>,
 }
 
+fn internal_error(message: impl Into<String>) -> RpcError<()> {
+    RpcError {
+        code: 500,
+        message: message.into(),
+        data: None,
+    }
+}
+
 // Note: it is safe to use unwrap here, since we test the parseability of the map in the test below.
 fn leader_geo_by_ip() -> &'static HashMap<String, IpGeoInfo> {
     LEADER_GEO_BY_IP.get_or_init(|| {
@@ -71,7 +79,9 @@ async fn cluster_ip_by_pubkey_cached(
 ) -> Result<HashMap<String, IpAddr>, RpcError<()>> {
     let cache = CLUSTER_NODE_IP_CACHE.get_or_init(|| Mutex::new(None));
     {
-        let guard = cache.lock().unwrap();
+        let guard = cache.lock().map_err(|_| {
+            internal_error("internal error: failed to read cluster-node cache (lock poisoned)")
+        })?;
         if let Some(entry) = guard.as_ref() {
             if entry.fetched_at.elapsed() <= CLUSTER_NODES_CACHE_TTL {
                 return Ok(entry.ip_by_pubkey.clone());
@@ -81,7 +91,8 @@ async fn cluster_ip_by_pubkey_cached(
 
     let ip_by_pubkey = client
         .get_cluster_nodes()
-        .await?
+        .await
+        .map_err(|err| internal_error(format!("failed to fetch Solana cluster nodes: {err}")))?
         .into_iter()
         .filter_map(|node| {
             node.gossip
@@ -93,7 +104,9 @@ async fn cluster_ip_by_pubkey_cached(
         .collect::<HashMap<String, IpAddr>>();
 
     {
-        let mut guard = cache.lock().unwrap();
+        let mut guard = cache.lock().map_err(|_| {
+            internal_error("internal error: failed to update cluster-node cache (lock poisoned)")
+        })?;
         *guard = Some(ClusterNodeIpCache {
             fetched_at: Instant::now(),
             ip_by_pubkey: ip_by_pubkey.clone(),
@@ -110,12 +123,21 @@ impl CustomProcedure for Geo {
 
     async fn run(_: Self::Params) -> Result<Self::SuccessData, RpcError<Self::ErrorData>> {
         let client = RpcClient::new();
-        let slot = client.get_slot().await?;
-        let epoch_info = client.get_epoch_info().await?;
+        let slot = client.get_slot().await.map_err(|err| {
+            internal_error(format!("failed to fetch current slot from Solana RPC: {err}"))
+        })?;
+        let epoch_info = client.get_epoch_info().await.map_err(|err| {
+            internal_error(format!("failed to fetch Solana epoch info: {err}"))
+        })?;
 
         let schedule = client
             .get_leader_schedule(Some(slot))
-            .await?
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to fetch leader schedule for slot {slot} from Solana RPC: {err}"
+                ))
+            })?
             .ok_or_else(|| RpcError {
                 code: 500,
                 message: format!("leader schedule is unavailable for slot {slot}"),
