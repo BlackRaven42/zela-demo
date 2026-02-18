@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::OnceLock};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use zela_std::{CustomProcedure, RpcError, rpc_client::RpcClient, zela_custom_procedure};
 
 pub struct Geo;
@@ -9,7 +8,7 @@ pub struct Geo;
 #[derive(Deserialize, Debug)]
 pub struct Input {}
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub enum Region {
     Frankfurt,
     Dubai,
@@ -29,19 +28,17 @@ const UNKNOWN_GEO: &str = "UNKNOWN";
 // Note: this is a compile-time check - which prevents us from submitting a procedure without the map!
 const LEADER_GEO_MAP_RAW: &str = include_str!("../data/ip-geo-map.json");
 // Note: OnceLock is needed to only load & parse once.
-static LEADER_GEO_BY_IP: OnceLock<HashMap<String, String>> = OnceLock::new();
+static LEADER_GEO_BY_IP: OnceLock<HashMap<String, IpGeoInfo>> = OnceLock::new();
+
+#[derive(Deserialize, Clone)]
+struct IpGeoInfo {
+    geo: String,
+    closest_region: Region,
+}
 
 // Note: it is safe to use unwrap here, since we test the parseability of the map in the test below.
-fn leader_geo_by_ip() -> &'static HashMap<String, String> {
-    LEADER_GEO_BY_IP.get_or_init(|| {
-        let parsed = serde_json::from_str::<Value>(LEADER_GEO_MAP_RAW).unwrap();
-        parsed
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(ip, geo)| (ip.clone(), geo.as_str().unwrap().to_string()))
-            .collect::<HashMap<String, String>>()
-    })
+fn leader_geo_by_ip() -> &'static HashMap<String, IpGeoInfo> {
+    LEADER_GEO_BY_IP.get_or_init(|| serde_json::from_str::<HashMap<String, IpGeoInfo>>(LEADER_GEO_MAP_RAW).unwrap())
 }
 
 impl CustomProcedure for Geo {
@@ -80,7 +77,9 @@ impl CustomProcedure for Geo {
                 data: None,
             })?;
 
-        let leader_geo = {
+        let fallback = (UNKNOWN_GEO.to_string(), Region::Tokyo);
+
+        let (leader_geo, closest_region) = {
             let nodes = client.get_cluster_nodes().await?;
             let endpoint = nodes
                 .into_iter()
@@ -91,20 +90,18 @@ impl CustomProcedure for Geo {
                 Some(addr) => {
                     let ip = addr.ip();
                     if ip.is_loopback() || ip.is_unspecified() {
-                        UNKNOWN_GEO.to_string()
+                        fallback.clone()
                     } else {
                         let ip_s = ip.to_string();
-                        leader_geo_by_ip()
-                            .get(&ip_s)
-                            .cloned()
-                            .unwrap_or_else(|| UNKNOWN_GEO.to_string())
+                        match leader_geo_by_ip().get(&ip_s) {
+                            Some(info) => (info.geo.clone(), info.closest_region),
+                            None => fallback.clone(),
+                        }
                     }
                 }
-                None => UNKNOWN_GEO.to_string(),
+                None => fallback.clone(),
             }
         };
-
-        let closest_region = Region::Frankfurt;
 
         Ok(Output {
             slot,
@@ -128,6 +125,6 @@ mod tests {
         let map = leader_geo_by_ip();
         assert!(!map.is_empty());
         assert!(map.keys().all(|ip| !ip.trim().is_empty()));
-        assert!(map.values().all(|geo| !geo.trim().is_empty()));
+        assert!(map.values().all(|v| !v.geo.trim().is_empty()));
     }
 }
